@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "factory-lab"
+version = "0.1.0"
+description = "Factory Lab - Autonomous AI-powered software engineering framework"
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.9,<1.0",
+]
+
+[project.scripts]
+factory = "factory.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
