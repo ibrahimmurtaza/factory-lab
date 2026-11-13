@@ -28,6 +28,9 @@ _project_app = typer.Typer(
 )
 app.add_typer(_project_app, name="project")
 
+from factory.cli.commands.task import task_app  # noqa: E402
+app.add_typer(task_app, name="task")
+
 
 def _config_manager() -> ConfigManager:
     return ConfigManager(JsonConfigStorage(default_config_path()))
