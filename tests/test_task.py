@@ -29,6 +29,7 @@ from factory.control.task_models import (
     TaskStatus,
 )
 from factory.errors import (
+    ActorResolutionError,
     InvalidTaskTransitionError,
     PlanValidationError,
     PlanningError,
@@ -856,3 +857,414 @@ def test_plan_task_uses_only_profiler_public_contract():
         "detector" in str(call).lower()
         for call in profiler.mock_calls
     )
+
+
+# ---------------------------------------------------------------------------
+# approve / reject / cancel helpers
+# ---------------------------------------------------------------------------
+
+
+def _awaiting_approval_record() -> TaskRecord:
+    now = datetime.now(timezone.utc)
+    plan = _plan()
+    revision = PlanRevision(
+        revision_number=1,
+        created_at=now,
+        status="awaiting_approval",
+        plan=plan,
+        approval=None,
+    )
+    record = TaskRecord(
+        task_id="task_abc123",
+        project_id="proj-1",
+        description="implement the feature",
+        status=TaskStatus.AWAITING_APPROVAL,
+        created_at=now,
+        updated_at=now,
+        current_revision=1,
+        plan_revisions=[revision],
+    )
+    record.lifecycle_history.append(
+        LifecycleEvent(
+            from_status=None,
+            to_status=TaskStatus.CREATED,
+            timestamp=now,
+            actor=None,
+        )
+    )
+    record.lifecycle_history.append(
+        LifecycleEvent(
+            from_status=TaskStatus.CREATED,
+            to_status=TaskStatus.PLANNING,
+            timestamp=now,
+            actor=None,
+        )
+    )
+    record.lifecycle_history.append(
+        LifecycleEvent(
+            from_status=TaskStatus.PLANNING,
+            to_status=TaskStatus.AWAITING_APPROVAL,
+            timestamp=now,
+            actor=None,
+        )
+    )
+    return record
+
+
+# ---------------------------------------------------------------------------
+# approve_task
+# ---------------------------------------------------------------------------
+
+
+def test_approve_task_transitions_to_approved():
+    service, storage, project_service, profiler, planner, actor_resolver = (
+        _make_service()
+    )
+    actor_resolver.resolve.return_value = "alice"
+    storage.load.return_value = _awaiting_approval_record()
+
+    record = service.approve_task("task_abc123")
+
+    assert record.status == TaskStatus.APPROVED
+    current_rev = record.plan_revisions[0]
+    assert current_rev.status == "approved"
+    assert current_rev.approval is not None
+    assert current_rev.approval.decision == "approved"
+    assert current_rev.approval.actor == "alice"
+    assert current_rev.approval.reason is None
+    actor_resolver.resolve.assert_called_once()
+    storage.save.assert_called_once()
+
+
+def test_approve_task_records_lifecycle_event():
+    service, storage, project_service, profiler, planner, actor_resolver = (
+        _make_service()
+    )
+    actor_resolver.resolve.return_value = "bob"
+    storage.load.return_value = _awaiting_approval_record()
+
+    service.approve_task("task_abc123")
+
+    saved_record = storage.save.call_args[0][1]
+    events = saved_record.lifecycle_history
+    approve_events = [
+        e for e in events if e.to_status == TaskStatus.APPROVED
+    ]
+    assert len(approve_events) == 1
+    assert approve_events[0].from_status == TaskStatus.AWAITING_APPROVAL
+    assert approve_events[0].actor == "bob"
+
+
+def test_approve_task_unknown_task_raises():
+    service, storage, *_ = _make_service()
+    storage.load.return_value = None
+
+    with pytest.raises(TaskNotFoundError):
+        service.approve_task("task_missing")
+
+    storage.save.assert_not_called()
+
+
+def test_approve_task_not_awaiting_approval_raises():
+    service, storage, *_ = _make_service()
+    storage.load.return_value = _planning_record(status=TaskStatus.CREATED)
+
+    with pytest.raises(InvalidTaskTransitionError):
+        service.approve_task("task_abc123")
+
+    storage.save.assert_not_called()
+
+
+def test_approve_task_no_current_revision_raises():
+    service, storage, project_service, profiler, planner, actor_resolver = (
+        _make_service()
+    )
+    actor_resolver.resolve.return_value = "alice"
+    now = datetime.now(timezone.utc)
+    record = TaskRecord(
+        task_id="task_abc123",
+        project_id="proj-1",
+        description="implement the feature",
+        status=TaskStatus.AWAITING_APPROVAL,
+        created_at=now,
+        updated_at=now,
+        current_revision=None,
+        plan_revisions=[],
+    )
+    storage.load.return_value = record
+
+    with pytest.raises(InvalidTaskTransitionError):
+        service.approve_task("task_abc123")
+
+    storage.save.assert_not_called()
+
+
+def test_approve_task_actor_resolution_error():
+    service, storage, *_unused, actor_resolver = _make_service()
+    actor_resolver.resolve.side_effect = ActorResolutionError(
+        "no actor", detail="none"
+    )
+    storage.load.return_value = _awaiting_approval_record()
+
+    with pytest.raises(ActorResolutionError):
+        service.approve_task("task_abc123")
+
+    storage.save.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# reject_task
+# ---------------------------------------------------------------------------
+
+
+def test_reject_task_transitions_to_rejected():
+    service, storage, project_service, profiler, planner, actor_resolver = (
+        _make_service()
+    )
+    actor_resolver.resolve.return_value = "carol"
+    storage.load.return_value = _awaiting_approval_record()
+
+    record = service.reject_task("task_abc123", "plan lacks tests")
+
+    assert record.status == TaskStatus.REJECTED
+    current_rev = record.plan_revisions[0]
+    assert current_rev.status == "rejected"
+    assert current_rev.approval is not None
+    assert current_rev.approval.decision == "rejected"
+    assert current_rev.approval.actor == "carol"
+    assert current_rev.approval.reason == "plan lacks tests"
+    actor_resolver.resolve.assert_called_once()
+    storage.save.assert_called_once()
+
+
+def test_reject_task_records_lifecycle_event_with_reason():
+    service, storage, project_service, profiler, planner, actor_resolver = (
+        _make_service()
+    )
+    actor_resolver.resolve.return_value = "dave"
+    storage.load.return_value = _awaiting_approval_record()
+
+    service.reject_task("task_abc123", "insufficient detail")
+
+    saved_record = storage.save.call_args[0][1]
+    events = saved_record.lifecycle_history
+    reject_events = [
+        e for e in events if e.to_status == TaskStatus.REJECTED
+    ]
+    assert len(reject_events) == 1
+    assert reject_events[0].from_status == TaskStatus.AWAITING_APPROVAL
+    assert reject_events[0].actor == "dave"
+    assert reject_events[0].reason == "insufficient detail"
+
+
+def test_reject_task_empty_reason_raises():
+    service, *_ = _make_service()
+
+    with pytest.raises(TaskValidationError):
+        service.reject_task("task_abc123", "")
+
+    with pytest.raises(TaskValidationError):
+        service.reject_task("task_abc123", "   ")
+
+
+def test_reject_task_unknown_task_raises():
+    service, storage, *_ = _make_service()
+    storage.load.return_value = None
+
+    with pytest.raises(TaskNotFoundError):
+        service.reject_task("task_missing", "reason")
+
+    storage.save.assert_not_called()
+
+
+def test_reject_task_not_awaiting_approval_raises():
+    service, storage, *_ = _make_service()
+    storage.load.return_value = _planning_record(status=TaskStatus.APPROVED)
+
+    with pytest.raises(InvalidTaskTransitionError):
+        service.reject_task("task_abc123", "reason")
+
+    storage.save.assert_not_called()
+
+
+def test_reject_task_no_current_revision_raises():
+    service, storage, project_service, profiler, planner, actor_resolver = (
+        _make_service()
+    )
+    actor_resolver.resolve.return_value = "eve"
+    now = datetime.now(timezone.utc)
+    record = TaskRecord(
+        task_id="task_abc123",
+        project_id="proj-1",
+        description="implement the feature",
+        status=TaskStatus.AWAITING_APPROVAL,
+        created_at=now,
+        updated_at=now,
+        current_revision=None,
+        plan_revisions=[],
+    )
+    storage.load.return_value = record
+
+    with pytest.raises(InvalidTaskTransitionError):
+        service.reject_task("task_abc123", "reason")
+
+    storage.save.assert_not_called()
+
+
+def test_reject_task_actor_resolution_error():
+    service, storage, *_unused, actor_resolver = _make_service()
+    actor_resolver.resolve.side_effect = ActorResolutionError(
+        "no actor", detail="none"
+    )
+    storage.load.return_value = _awaiting_approval_record()
+
+    with pytest.raises(ActorResolutionError):
+        service.reject_task("task_abc123", "reason")
+
+    storage.save.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# cancel_task
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_task_created_to_cancelled():
+    service, storage, project_service, profiler, planner, actor_resolver = (
+        _make_service()
+    )
+    actor_resolver.resolve.return_value = "frank"
+    storage.load.return_value = _planning_record(status=TaskStatus.CREATED)
+
+    record = service.cancel_task("task_abc123")
+
+    assert record.status == TaskStatus.CANCELLED
+    actor_resolver.resolve.assert_called_once()
+    storage.save.assert_called_once()
+
+
+def test_cancel_task_awaiting_approval_to_cancelled():
+    service, storage, project_service, profiler, planner, actor_resolver = (
+        _make_service()
+    )
+    actor_resolver.resolve.return_value = "grace"
+    storage.load.return_value = _awaiting_approval_record()
+
+    record = service.cancel_task("task_abc123")
+
+    assert record.status == TaskStatus.CANCELLED
+
+
+def test_cancel_task_approved_to_cancelled():
+    service, storage, project_service, profiler, planner, actor_resolver = (
+        _make_service()
+    )
+    actor_resolver.resolve.return_value = "heidi"
+    storage.load.return_value = _approved_record()
+
+    record = service.cancel_task("task_abc123")
+
+    assert record.status == TaskStatus.CANCELLED
+
+
+def test_cancel_task_rejected_to_cancelled():
+    service, storage, project_service, profiler, planner, actor_resolver = (
+        _make_service()
+    )
+    actor_resolver.resolve.return_value = "ivan"
+    now = datetime.now(timezone.utc)
+    plan = _plan()
+    revision = PlanRevision(
+        revision_number=1,
+        created_at=now,
+        status="rejected",
+        plan=plan,
+        approval=None,
+    )
+    record = TaskRecord(
+        task_id="task_abc123",
+        project_id="proj-1",
+        description="implement the feature",
+        status=TaskStatus.REJECTED,
+        created_at=now,
+        updated_at=now,
+        current_revision=1,
+        plan_revisions=[revision],
+    )
+    storage.load.return_value = record
+
+    result = service.cancel_task("task_abc123")
+
+    assert result.status == TaskStatus.CANCELLED
+
+
+def test_cancel_task_planning_raises():
+    service, storage, *_ = _make_service()
+    storage.load.return_value = _planning_record(status=TaskStatus.PLANNING)
+
+    with pytest.raises(InvalidTaskTransitionError):
+        service.cancel_task("task_abc123")
+
+    storage.save.assert_not_called()
+
+
+def test_cancel_task_cancelled_raises():
+    service, storage, *_ = _make_service()
+    storage.load.return_value = _planning_record(status=TaskStatus.CANCELLED)
+
+    with pytest.raises(InvalidTaskTransitionError):
+        service.cancel_task("task_abc123")
+
+    storage.save.assert_not_called()
+
+
+def test_cancel_task_unknown_task_raises():
+    service, storage, *_ = _make_service()
+    storage.load.return_value = None
+
+    with pytest.raises(TaskNotFoundError):
+        service.cancel_task("task_missing")
+
+    storage.save.assert_not_called()
+
+
+def test_cancel_task_actor_resolution_error():
+    service, storage, *_unused, actor_resolver = _make_service()
+    actor_resolver.resolve.side_effect = ActorResolutionError(
+        "no actor", detail="none"
+    )
+    storage.load.return_value = _awaiting_approval_record()
+
+    with pytest.raises(ActorResolutionError):
+        service.cancel_task("task_abc123")
+
+    storage.save.assert_not_called()
+
+
+def test_cancel_task_records_lifecycle_event():
+    service, storage, project_service, profiler, planner, actor_resolver = (
+        _make_service()
+    )
+    actor_resolver.resolve.return_value = "judy"
+    storage.load.return_value = _planning_record(status=TaskStatus.APPROVED)
+
+    service.cancel_task("task_abc123")
+
+    saved_record = storage.save.call_args[0][1]
+    events = saved_record.lifecycle_history
+    cancel_events = [
+        e for e in events if e.to_status == TaskStatus.CANCELLED
+    ]
+    assert len(cancel_events) == 1
+    assert cancel_events[0].from_status == TaskStatus.APPROVED
+    assert cancel_events[0].actor == "judy"
+
+
+def test_cancel_task_invalid_transition_approve_created():
+    service, storage, *_ = _make_service()
+    storage.load.return_value = _planning_record(status=TaskStatus.CREATED)
+
+    with pytest.raises(InvalidTaskTransitionError):
+        service.approve_task("task_abc123")
+
+    storage.save.assert_not_called()

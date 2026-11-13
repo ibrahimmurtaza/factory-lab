@@ -20,6 +20,7 @@ from factory.control.actor import ActorResolver
 from factory.control.planner import TaskPlanner
 from factory.control.projects.service import ProjectService
 from factory.control.task_models import (
+    ApprovalRecord,
     ImplementationPlan,
     LifecycleEvent,
     PlanRevision,
@@ -29,6 +30,7 @@ from factory.control.task_models import (
 from factory.control.task_storage import TaskStorage
 from factory.intelligence.engine import ProjectProfiler
 from factory.errors import (
+    ActorResolutionError,
     InvalidTaskTransitionError,
     PlanValidationError,
     PlanningError,
@@ -289,6 +291,217 @@ class TaskService:
                 )
             )
             self._storage.save(task_id, record)
+            raise
+
+    def approve_task(self, task_id: str) -> TaskRecord:
+        """Approve the current plan revision for ``task_id``.
+
+        Resolves the actor via :class:`ActorResolver`, records an
+        :class:`ApprovalRecord` on the current revision, and transitions
+        the task to ``approved``.
+
+        Args:
+            task_id: Stable task identifier with the ``task_`` prefix.
+
+        Returns:
+            The updated :class:`TaskRecord`.
+
+        Raises:
+            TaskValidationError: If ``task_id`` is invalid.
+            TaskNotFoundError: If no task has ``task_id``.
+            InvalidTaskTransitionError: If the task is not in
+                ``awaiting_approval`` state or has no current revision.
+            ActorResolutionError: If the actor cannot be resolved.
+        """
+        self._validate_task_id(task_id)
+        record = self._storage.load(task_id)
+        if record is None:
+            raise TaskNotFoundError(
+                f"Unknown task id: {task_id}", detail=task_id
+            )
+
+        if record.status != TaskStatus.AWAITING_APPROVAL:
+            raise InvalidTaskTransitionError(
+                f"Cannot approve task {task_id} in {record.status.value} state",
+                detail="Task must be awaiting_approval.",
+            )
+
+        current_revision = self._get_current_revision(record)
+        if current_revision is None:
+            raise InvalidTaskTransitionError(
+                f"Cannot approve task {task_id}: no current revision",
+                detail="A plan revision must exist before approval.",
+            )
+
+        actor = self._resolve_actor()
+
+        now = datetime.now(timezone.utc)
+        current_revision.status = "approved"
+        current_revision.approval = ApprovalRecord(
+            decision="approved",
+            actor=actor,
+            timestamp=now,
+            reason=None,
+        )
+        record.status = TaskStatus.APPROVED
+        record.updated_at = now
+        record.lifecycle_history.append(
+            LifecycleEvent(
+                from_status=TaskStatus.AWAITING_APPROVAL,
+                to_status=TaskStatus.APPROVED,
+                timestamp=now,
+                actor=actor,
+                reason=None,
+            )
+        )
+
+        self._storage.save(task_id, record)
+        return record
+
+    def reject_task(self, task_id: str, reason: str) -> TaskRecord:
+        """Reject the current plan revision for ``task_id``.
+
+        Resolves the actor via :class:`ActorResolver`, records an
+        :class:`ApprovalRecord` with the reason on the current revision,
+        and transitions the task to ``rejected``.
+
+        Args:
+            task_id: Stable task identifier with the ``task_`` prefix.
+            reason: Reason for rejection.
+
+        Returns:
+            The updated :class:`TaskRecord`.
+
+        Raises:
+            TaskValidationError: If ``task_id`` is invalid or ``reason``
+                is empty.
+            TaskNotFoundError: If no task has ``task_id``.
+            InvalidTaskTransitionError: If the task is not in
+                ``awaiting_approval`` state or has no current revision.
+            ActorResolutionError: If the actor cannot be resolved.
+        """
+        self._validate_task_id(task_id)
+        record = self._storage.load(task_id)
+        if record is None:
+            raise TaskNotFoundError(
+                f"Unknown task id: {task_id}", detail=task_id
+            )
+
+        if not reason or not reason.strip():
+            raise TaskValidationError(
+                "Rejection reason must not be empty", detail=reason
+            )
+
+        if record.status != TaskStatus.AWAITING_APPROVAL:
+            raise InvalidTaskTransitionError(
+                f"Cannot reject task {task_id} in {record.status.value} state",
+                detail="Task must be awaiting_approval.",
+            )
+
+        current_revision = self._get_current_revision(record)
+        if current_revision is None:
+            raise InvalidTaskTransitionError(
+                f"Cannot reject task {task_id}: no current revision",
+                detail="A plan revision must exist before rejection.",
+            )
+
+        actor = self._resolve_actor()
+
+        now = datetime.now(timezone.utc)
+        current_revision.status = "rejected"
+        current_revision.approval = ApprovalRecord(
+            decision="rejected",
+            actor=actor,
+            timestamp=now,
+            reason=reason.strip(),
+        )
+        record.status = TaskStatus.REJECTED
+        record.updated_at = now
+        record.lifecycle_history.append(
+            LifecycleEvent(
+                from_status=TaskStatus.AWAITING_APPROVAL,
+                to_status=TaskStatus.REJECTED,
+                timestamp=now,
+                actor=actor,
+                reason=reason.strip(),
+            )
+        )
+
+        self._storage.save(task_id, record)
+        return record
+
+    def cancel_task(self, task_id: str) -> TaskRecord:
+        """Cancel ``task_id`` when the current lifecycle state permits.
+
+        Resolves the actor via :class:`ActorResolver` and transitions
+        the task to ``cancelled`` (terminal state).
+
+        Cancellation is permitted from ``created``, ``awaiting_approval``,
+        ``approved``, and ``rejected``. It is disallowed from ``planning``
+        and ``cancelled``.
+
+        Args:
+            task_id: Stable task identifier with the ``task_`` prefix.
+
+        Returns:
+            The updated :class:`TaskRecord`.
+
+        Raises:
+            TaskValidationError: If ``task_id`` is invalid.
+            TaskNotFoundError: If no task has ``task_id``.
+            InvalidTaskTransitionError: If cancellation is not permitted
+                from the current state.
+            ActorResolutionError: If the actor cannot be resolved.
+        """
+        self._validate_task_id(task_id)
+        record = self._storage.load(task_id)
+        if record is None:
+            raise TaskNotFoundError(
+                f"Unknown task id: {task_id}", detail=task_id
+            )
+
+        if record.status == TaskStatus.CANCELLED:
+            raise InvalidTaskTransitionError(
+                f"Cannot cancel task {task_id}: already cancelled",
+                detail="Cancelled is a terminal state.",
+            )
+        if record.status == TaskStatus.PLANNING:
+            raise InvalidTaskTransitionError(
+                f"Cannot cancel task {task_id} in planning state",
+                detail="Wait for planning to complete before cancelling.",
+            )
+
+        actor = self._resolve_actor()
+
+        now = datetime.now(timezone.utc)
+        original_status = record.status
+        record.status = TaskStatus.CANCELLED
+        record.updated_at = now
+        record.lifecycle_history.append(
+            LifecycleEvent(
+                from_status=original_status,
+                to_status=TaskStatus.CANCELLED,
+                timestamp=now,
+                actor=actor,
+                reason=None,
+            )
+        )
+
+        self._storage.save(task_id, record)
+        return record
+
+    def _resolve_actor(self) -> str:
+        """Resolve the actor for lifecycle attribution.
+
+        Returns:
+            The resolved actor string.
+
+        Raises:
+            ActorResolutionError: If the actor cannot be resolved.
+        """
+        try:
+            return self._actor_resolver.resolve()
+        except ActorResolutionError:
             raise
 
     def _profile_and_plan(self, record: TaskRecord) -> ImplementationPlan:
