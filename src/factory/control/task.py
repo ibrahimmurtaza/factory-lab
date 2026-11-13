@@ -14,14 +14,29 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any, List
+from typing import List, Optional
 
 from factory.control.actor import ActorResolver
+from factory.control.planner import TaskPlanner
 from factory.control.projects.service import ProjectService
-from factory.control.task_models import LifecycleEvent, TaskRecord, TaskStatus
+from factory.control.task_models import (
+    ImplementationPlan,
+    LifecycleEvent,
+    PlanRevision,
+    TaskRecord,
+    TaskStatus,
+)
 from factory.control.task_storage import TaskStorage
 from factory.intelligence.engine import ProjectProfiler
-from factory.errors import TaskNotFoundError, TaskValidationError
+from factory.errors import (
+    InvalidTaskTransitionError,
+    PlanValidationError,
+    PlanningError,
+    ProjectInspectionError,
+    ProjectNotFoundError,
+    TaskNotFoundError,
+    TaskValidationError,
+)
 
 TASK_ID_PREFIX = "task_"
 
@@ -150,3 +165,212 @@ class TaskService:
                 f"Task ID contains invalid path characters: {task_id!r}",
                 detail="path traversal is not allowed",
             )
+
+    def plan_task(self, task_id: str) -> TaskRecord:
+        """Generate an implementation plan for ``task_id``.
+
+        Transitions the task to ``planning`` at start, then to
+        ``awaiting_approval`` on success. On failure, reverts to the
+        pre-planning status and preserves all revisions and approvals.
+
+        For an ``approved`` task, generates a candidate plan without
+        changing persisted state. If the candidate is equivalent to the
+        current approved revision's plan, the existing revision and
+        approval are retained and the task remains ``approved``. If
+        materially different, a new revision is appended, the previous
+        approved revision is marked ``superseded``, and the task
+        transitions to ``awaiting_approval``.
+
+        Args:
+            task_id: Stable task identifier with the ``task_`` prefix.
+
+        Returns:
+            The updated :class:`TaskRecord`.
+
+        Raises:
+            TaskValidationError: If ``task_id`` is invalid.
+            TaskNotFoundError: If no task has ``task_id``.
+            InvalidTaskTransitionError: If the task is in
+                ``awaiting_approval`` or ``cancelled`` state.
+            ProjectNotFoundError: If the task's project is unknown.
+            ProjectInspectionError: If project profiling fails.
+            PlanningError: If plan generation fails.
+            PlanValidationError: If the generated plan is invalid.
+        """
+        self._validate_task_id(task_id)
+        record = self._storage.load(task_id)
+        if record is None:
+            raise TaskNotFoundError(
+                f"Unknown task id: {task_id}", detail=task_id
+            )
+
+        original_status = record.status
+        now = datetime.now(timezone.utc)
+
+        # Reject transitions that are not permitted.
+        if original_status == TaskStatus.AWAITING_APPROVAL:
+            raise InvalidTaskTransitionError(
+                f"Cannot plan task {task_id} in awaiting_approval state",
+                detail="Approve or reject the current plan first.",
+            )
+        if original_status == TaskStatus.CANCELLED:
+            raise InvalidTaskTransitionError(
+                f"Cannot plan cancelled task {task_id}",
+                detail="Cancelled is a terminal state.",
+            )
+
+        # For approved tasks, check candidate-plan equivalence before any
+        # persisted state change.
+        if original_status == TaskStatus.APPROVED:
+            plan = self._profile_and_plan(record)
+            current_revision = self._get_current_revision(record)
+            if current_revision is not None and plan == current_revision.plan:
+                # Equivalent: retain existing revision and approval.
+                return record
+            # Materially different: mark previous revision superseded.
+            current_revision.status = "superseded"
+
+        # For created / rejected: transition to planning first.
+        else:
+            record.status = TaskStatus.PLANNING
+            record.updated_at = now
+            record.lifecycle_history.append(
+                LifecycleEvent(
+                    from_status=original_status,
+                    to_status=TaskStatus.PLANNING,
+                    timestamp=now,
+                    actor=None,
+                )
+            )
+
+        try:
+            plan = self._profile_and_plan(record)
+
+            # Append new revision and transition to awaiting_approval.
+            new_revision_number = self._next_revision_number(record)
+            new_revision = PlanRevision(
+                revision_number=new_revision_number,
+                created_at=now,
+                status="awaiting_approval",
+                plan=plan,
+                approval=None,
+            )
+            record.plan_revisions.append(new_revision)
+            record.current_revision = new_revision_number
+            record.status = TaskStatus.AWAITING_APPROVAL
+            record.updated_at = now
+            record.lifecycle_history.append(
+                LifecycleEvent(
+                    from_status=TaskStatus.PLANNING,
+                    to_status=TaskStatus.AWAITING_APPROVAL,
+                    timestamp=now,
+                    actor=None,
+                )
+            )
+
+            self._storage.save(task_id, record)
+            return record
+
+        except (
+            ProjectNotFoundError,
+            ProjectInspectionError,
+            PlanningError,
+            PlanValidationError,
+        ):
+            # Revert to pre-planning status; preserve revisions.
+            record.status = original_status
+            record.updated_at = now
+            record.lifecycle_history.append(
+                LifecycleEvent(
+                    from_status=TaskStatus.PLANNING,
+                    to_status=original_status,
+                    timestamp=now,
+                    actor=None,
+                )
+            )
+            self._storage.save(task_id, record)
+            raise
+
+    def _profile_and_plan(self, record: TaskRecord) -> ImplementationPlan:
+        """Look up the project, profile it, and generate a plan.
+
+        Wraps lower-level failures into domain exceptions without
+        mutating the task record.
+        """
+        # Verify the project exists via M2 ProjectService.
+        self._project_service.get_project(record.project_id)
+
+        # Profile the project via M3 ProjectProfiler.
+        try:
+            profile = self._profiler.profile(record.project_id)
+        except ProjectNotFoundError:
+            raise
+        except Exception as exc:  # pragma: no cover - infrastructure failure
+            raise ProjectInspectionError(
+                f"Project profiling failed for project {record.project_id}",
+                detail=str(exc),
+            ) from exc
+
+        # Generate the plan via the injected TaskPlanner.
+        try:
+            plan = self._planner.create_plan(record.description, profile)
+        except PlanningError:
+            raise
+        except Exception as exc:  # pragma: no cover - infrastructure failure
+            raise PlanningError(
+                f"Plan generation failed for task {record.task_id}",
+                detail=str(exc),
+            ) from exc
+
+        # Validate the plan before any persistence.
+        self._validate_plan(plan)
+        return plan
+
+    def _validate_plan(self, plan: ImplementationPlan) -> None:
+        """Validate an ``ImplementationPlan`` before persistence.
+
+        Raises:
+            PlanValidationError: If the plan is structurally invalid.
+        """
+        if not plan.summary or not plan.summary.strip():
+            raise PlanValidationError(
+                "Plan summary is required", detail="summary"
+            )
+
+        step_numbers = [step.number for step in plan.implementation_steps]
+        if len(step_numbers) != len(set(step_numbers)):
+            raise PlanValidationError(
+                "Step numbers must be unique within the plan",
+                detail="implementation_steps",
+            )
+
+        existing_step_numbers = set(step_numbers)
+        for step in plan.implementation_steps:
+            for dep in step.depends_on:
+                if dep == step.number:
+                    raise PlanValidationError(
+                        f"Step {step.number} cannot depend on itself",
+                        detail="implementation_steps",
+                    )
+                if dep not in existing_step_numbers:
+                    raise PlanValidationError(
+                        f"Step {step.number} depends on unknown step {dep}",
+                        detail="implementation_steps",
+                    )
+
+    def _get_current_revision(
+        self, record: TaskRecord
+    ) -> Optional[PlanRevision]:
+        """Return the active :class:`PlanRevision`, or ``None``."""
+        if record.current_revision is None:
+            return None
+        for revision in record.plan_revisions:
+            if revision.revision_number == record.current_revision:
+                return revision
+        return None
+
+    def _next_revision_number(self, record: TaskRecord) -> int:
+        """Return the next sequential revision number for ``record``."""
+        if not record.plan_revisions:
+            return 1
+        return max(r.revision_number for r in record.plan_revisions) + 1
