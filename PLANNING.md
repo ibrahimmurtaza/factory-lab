@@ -17,7 +17,7 @@
 M1: Architectural foundation (docs)        -> no code dependencies
 M2: CLI scaffold (init, project add/list)  -> M1, Typer decision
 M3: Project registration & inspection      -> M2, Git CLI
-M4: Task intake & planning                 -> M3, model provider abstraction
+M4: Task intake & planning                 -> M3
 M5: OpenCode execution & tracking          -> M4, OpenCode adapter
 M6: QA & approval gates                    -> M5
 M7: Persistence & observability            -> M6, DB/OTel decision
@@ -25,7 +25,6 @@ M7: Persistence & observability            -> M6, DB/OTel decision
 
 Dependencies:
 - M2 requires CLI framework selection (Typer recommended, not yet installed).
-- M4 requires model provider interface chosen (OpenRouter recommended).
 - M5 requires M4 and OpenCode available in execution environment.
 - M7 requires infrastructure decision (PostgreSQL/Redis) — deferred past Phase 1.
 
@@ -47,9 +46,11 @@ Dependencies:
 - Tech detection heuristic documented; no false hard dependencies on specific languages.
 
 ### M4 — Task intake & planning
-- `factory task run <project> "<description>"` creates a task and generates a plan.
-- `factory task status <task-id>` returns task state.
-- Plan is a reviewable artifact before execution.
+- `factory task create <project> "<description>"` creates a task in `created` state.
+- `factory task plan <task-id>` generates a deterministic implementation plan; plan enters `awaiting_approval`.
+- `factory task approve` / `factory task reject` / `factory task cancel <task-id>` record the actor-attributed approval decision; plan approval is part of Phase 1.
+- `factory task status` / `factory task show <task-id>` return concise task state and the full record.
+- Plan approval does not execute code or modify repositories (execution deferred to M5).
 
 ### M5 — OpenCode execution & tracking
 - OpenCode adapter executes the plan against the registered project.

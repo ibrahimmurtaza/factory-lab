@@ -64,8 +64,9 @@ The two planes communicate through well-defined interfaces; neither imports the 
 | CLI application | Command parsing, user interaction, approval prompts | Entry point only |
 | Project management | Project registration, config, tech detection, task history | Owns project state |
 | Repository management | Repo discovery, workspace/gitworktree handling | Abstraction over Git CLI |
-| Task intake & management | Task creation, status, lifecycle tracking | Owns task state |
-| Agent orchestration | Plan generation, agent delegation, state transitions | Stateful orchestration logic |
+| Task intake & management | Task creation, status, lifecycle tracking, plan approval | Owns task state |
+| Implementation planning | Deterministic implementation plan generation from project profile; tech overlays gated on inspection evidence | Control plane; no execution-plane imports |
+| Agent orchestration | Agent delegation, state transitions | Stateful orchestration logic |
 | Specialized agent roles | Architect, Developer, QA, Reviewer, EM | Logical roles, not separate model instances |
 | Coding runtime adapters | OpenCode (initial), future runtimes | Translates plan → runtime execution |
 | Model provider adapters | OpenRouter (initial), future providers | Abstraction over model API |
@@ -89,30 +90,25 @@ sequenceDiagram
     participant R as OpenCode Runtime
     participant G as Git / File System
 
-    U->>C: factory task run <project> "<description>"
+    U->>C: factory task create <project> "<description>"
     C->>P: resolve project config
-    C->>T: create task record
-    T->>O: dispatch task
-    O->>O: Architect: plan implementation
-    O->>T: update plan & status
-    O->>A: execute via coding runtime adapter
-    A->>R: run OpenCode with plan
-    R->>G: modify files, run commands, tests
-    G-->>R: results
-    R-->>A: execution output
-    A->>O: report status & artifacts
-    O->>T: finalize task status
-    O->>P: record execution history
-    C-->>U: task status and results
+    C->>T: create task record (created state)
+    C-->>U: task id and status
+    U->>C: factory task plan <task-id>
+    C->>T: generate deterministic implementation plan
+    T->>T: transition to awaiting_approval
+    C-->>U: plan revision ready for approval
+    U->>C: factory task approve/reject/cancel <task-id>
+    C->>T: record approval decision and actor attribution
+    C-->>U: updated task status
 ```
 
 1. **Register** — `factory project add <path>` stores project config and detects tech stack.
-2. **Intake** — `factory task run` creates a task record tied to a project.
-3. **Plan** — Architect agent produces an implementation plan.
-4. **Execute** — Orchestration delegates to a coding runtime adapter (OpenCode).
-5. **Act** — Execution plane modifies files, runs commands/tests via Git/workspace.
-6. **Track** — Status, logs, and artifacts are recorded; user polls `factory task status` / `factory task logs`.
-7. **Approve** — Sensitive operations pause at approval gates before proceeding.
+2. **Intake** — `factory task create <project> "<description>"` creates a task record in `created` state tied to a project.
+3. **Plan** — `factory task plan <task-id>` generates a deterministic implementation plan via the control-plane planner; the plan enters `awaiting_approval`.
+4. **Approve** — User reviews and approves/rejects/cancels the plan via `factory task approve` / `factory task reject` / `factory task cancel`; plan approval is part of Phase 1.
+5. **Execute** — Deferred to M5: orchestration delegates to a coding runtime adapter (OpenCode).
+6. **Track** — Status and history are recorded; user polls `factory task status` / `factory task show`.
 
 ## Local-to-Cloud Evolution
 

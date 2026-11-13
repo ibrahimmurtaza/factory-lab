@@ -58,6 +58,55 @@ Example:
 factory project inspect <project-id>
 ```
 
+## Task Management
+
+Factory Lab manages task intake, lifecycle, deterministic planning, and human plan approval:
+
+```text
+factory task create <project-id> "<description>"
+factory task list
+factory task status <task-id>
+factory task show <task-id>
+factory task plan <task-id>
+factory task approve <task-id>
+factory task reject <task-id> "<reason>"
+factory task cancel <task-id>
+```
+
+### `factory task create <project-id> "<description>"`
+
+Register a task in `created` state, tied to a registered project. The task id is globally unique with the `task_` prefix.
+
+### `factory task list`
+
+List all persisted task records.
+
+### `factory task status <task-id>`
+
+Print a concise overview of a task: id, project, description, status, and current revision.
+
+### `factory task show <task-id>`
+
+Print the complete task record: all plan revisions, approval decisions with actor and timestamp, and lifecycle history.
+
+### `factory task plan <task-id>`
+
+Generate a deterministic implementation plan via the control-plane planner and transition the task to `awaiting_approval`. Requires a registered project; missing projects or planning failures produce a clear error and preserve prior state.
+
+### `factory task approve <task-id>`
+
+Approve the current plan revision and transition the task to `approved`. Records the resolved actor and timestamp.
+
+### `factory task reject <task-id> "<reason>"`
+
+Reject the current plan revision with a reason and transition the task to `rejected`. Records the resolved actor and timestamp.
+
+### `factory task cancel <task-id>`
+
+Cancel the task when the current lifecycle state permits (`created`, `awaiting_approval`, `approved`, `rejected`). Cancellation is terminal; `planning` and `cancelled` states cannot be cancelled.
+
+Plan approval does not execute code, modify repositories, or trigger Git operations. Execution is deferred to a future milestone.
+
 ## Project Intelligence
 
 Factory Lab inspects registered repositories to detect:

@@ -58,9 +58,63 @@ Each detection records its category (`language`, `framework`, or `infrastructure
 - No secrets are printed.
 - Inspected repositories are never modified.
 
+## M4 — Task Intake and Planning (completed)
+
+**Task:** Implement task intake, lifecycle management, deterministic implementation planning, and human plan approval via the CLI.
+
+Implemented `factory task` commands plus the `TaskService`, `TaskStorage`, `DeterministicTaskPlanner`, and `ActorResolver` components in the control plane.
+
+### Implemented CLI commands
+
+| Command | Purpose |
+|---------|---------|
+| `factory task create <project-id> "<description>"` | Register a task in `created` state; persist it |
+| `factory task list` | List all task records |
+| `factory task status <task-id>` | Concise task overview |
+| `factory task show <task-id>` | Complete task record, all revisions, approvals, lifecycle history |
+| `factory task plan <task-id>` | Generate an implementation plan via `TaskPlanner`; transition to `awaiting_approval` |
+| `factory task approve <task-id>` | Approve the current plan revision; transition task to `approved` |
+| `factory task reject <task-id> "<reason>"` | Reject the current plan revision; transition task to `rejected` |
+| `factory task cancel <task-id>` | Cancel the task when the current lifecycle state permits |
+
+`factory task run` is reserved for a future execution-capable milestone and is not introduced in M4.
+
+### Data model
+
+Task lifecycle states: `created`, `planning`, `awaiting_approval`, `approved`, `rejected`, `cancelled`. A `TaskRecord` holds the task id, project id, description, status, timestamps, current revision, plan revisions, and lifecycle history. Plan revisions are sequential integers starting at 1; each wraps an `ImplementationPlan` with objectives, steps, components, dependencies, acceptance criteria, testing strategy, risks, and evidence. Approval belongs to an individual `PlanRevision`; historical approvals are preserved when a revision is superseded.
+
+### Persistence
+
+Task state is persisted as one JSON sidecar file per task under `~/.factory-lab/tasks/<task-id>.json`, with atomic writes (temporary file + `os.replace`) and schema versioning. A `TaskStorage` protocol (`load`, `save`, `list_all`) is implemented by `JsonTaskStorage` and is replaceable by a database at M7.
+
+### Lifecycle and approval
+
+Valid transitions: `created` → `planning` → `awaiting_approval` → `approved` or `rejected`; `rejected` → replan → `awaiting_approval`; `awaiting_approval` → `cancelled`; `approved` → replan → `awaiting_approval` (previous approved revision becomes `superseded`, retaining its `ApprovalRecord`). `cancelled` is terminal. Cancellation is permitted in `created`, `awaiting_approval`, `approved`, and `rejected`; disallowed in `planning` and `cancelled`. Actor attribution is resolved internally via `ActorResolver` (`FACTORY_LAB_ACTOR` env var, then `getpass.getuser()` fallback) and recorded on approval/rejection/cancellation.
+
+### Planning
+
+`DeterministicTaskPlanner` produces a fully populated `ImplementationPlan` from a task description and M3 `ProjectProfile`. It uses a generic six-step implementation lifecycle plus evidence-based technology overlays (Python, FastAPI, Django, React, Next.js, Flutter, Docker, PostgreSQL) gated on project evidence. No file paths, package names, versions, or test commands are invented. Same inputs produce equivalent plan output.
+
+### Acceptance Criteria (all met)
+
+1. `factory task create` creates a task in `created` state with a globally unique `task_`-prefixed id.
+2. All eight task commands registered under `factory task`; exit codes 0 (success), 1 (`FactoryError`), 2 (Typer arg validation).
+3. Valid lifecycle transitions enforced; invalid transitions raise `InvalidTaskTransitionError`.
+4. Rejection and cancellation record reasons; cancellation is terminal.
+5. Replanning after rejection appends a new revision; historical revisions and approvals preserved.
+6. `status` provides a concise overview; `show` displays the complete record and revision history.
+7. Plan approval does not execute code, modify repositories, or trigger Git operations (execution deferred to M5).
+8. No `ModelProvider`, OpenRouter integration, API-key handling, network, database, Docker, or cloud infrastructure in M4.
+
+### Validation Results
+
+- 237 automated tests pass (M2/M3 regression + M4 new), 1 skipped (symlink test on Windows).
+- Manual validation: all eight `factory task` commands behave as specified across exit codes 0/1/2.
+- `.github/workflows/opencode.yml` remains untouched.
+
 ## Out of scope (future milestones)
 
-- Task intake and execution (M4–M5).
+- Task execution (M5).
 - Persistence to a database (M7).
 - Web dashboard, API, Docker, cloud infrastructure.
 
