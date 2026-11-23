@@ -91,3 +91,17 @@ factory-lab/
 5. Do not commit, push, or create branches unless explicitly asked.
 6. Run lint + typecheck + tests after every change.
 7. Update ADRs when a decision changes; mark superseded ADRs with `Status: superseded`.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as GitHub issues in `ibrahimmurtaza/factory-lab`, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical triage roles mapped to default label strings. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout: root `GLOSSARY.md` + `docs/adr/`. See `docs/agents/domain.md`.

@@ -112,9 +112,29 @@ Valid transitions: `created` → `planning` → `awaiting_approval` → `approve
 - Manual validation: all eight `factory task` commands behave as specified across exit codes 0/1/2.
 - `.github/workflows/opencode.yml` remains untouched.
 
+## M5 — Execution Orchestration & Coding Runtime Integration (accepted direction)
+
+M5 introduces execution of approved implementation plans through a replaceable coding runtime, initially OpenCode. Execution operates in the execution plane behind the `CodingRuntime` interface; no OpenCode imports enter the control plane.
+
+### Accepted decisions
+
+- **Execution record:** Parallel `ExecutionRecord` sidecars under `~/.factory-lab/executions/`; one per attempt, linked to `task_id` and the exact approved plan revision. `TaskRecord` and `TaskStatus` are unchanged; a task stays `approved` during execution.
+- **Execution lifecycle:** `queued → running → completed`, with `failed` (OpenCode non-zero exit or interruption) and `paused` (pre-dispatch approval checkpoint only; no suspend/resume) as alternatives.
+- **Runtime invocation:** OpenCode as a subprocess CLI with opaque stdout/stderr plus exit code capture; no reliance on an unconfirmed structured event protocol.
+- **Step dispatch:** Strictly sequential, one approved implementation step at a time.
+- **Approval gates:** Pre-dispatch, operation-specific human approval for dependency installs, network commands, destructive Git, and writes outside `affected_components`; deny-by-default for unanticipated operations.
+- **Workspaces:** One Git worktree per attempt (`factory-lab-<task-id>-<attempt>`), adjacent to the repo; retained until user acknowledgment; never auto-merged.
+- **Security:** Environment-variable allowlist for the OpenCode subprocess; secret redaction from captured output/logs; no OS-level sandboxing in M5 (worktree isolation is not a sandbox).
+- **Delivery:** `factory task deliver <exec-id>` stages worktree changes into a feature branch in the original repository; user confirms each delivery; no auto-merge or PR.
+- **Cleanup:** `factory task cleanup <exec-id>` refuses on dirty/non-terminal worktrees unless `--force`; artifacts and execution records retained independently.
+- **Recovery:** Graceful subprocess termination on interruption; failed executions preserve worktree/logs/artifacts; no resume; crash leaves execution in `running` for manual reconciliation.
+
+### Out of scope for M5
+
+- OS-level process sandboxing, resume of a terminated process, database persistence (M7), cloud worker infrastructure, GitHub PR creation, automatic merging.
+
 ## Out of scope (future milestones)
 
-- Task execution (M5).
 - Persistence to a database (M7).
 - Web dashboard, API, Docker, cloud infrastructure.
 

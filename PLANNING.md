@@ -53,9 +53,19 @@ Dependencies:
 - Plan approval does not execute code or modify repositories (execution deferred to M5).
 
 ### M5 — OpenCode execution & tracking
-- OpenCode adapter executes the plan against the registered project.
+- `CodingRuntime` interface with an OpenCode subprocess adapter; no OpenCode imports in orchestration.
+- `ExecutionEnvironment` interface with a local-process implementation; cloud-worker path preserved for later.
+- `ExecutionRecord` sidecars under `~/.factory-lab/executions/`; one per attempt, linked to task and approved plan revision.
+- Per-execution `logs/`, `artifacts/`, `test-results/` directories preserving partial output on failure.
+- Step-by-step, strictly sequential dispatch of approved implementation steps.
+- Pre-dispatch, operation-specific human approval for sensitive operations; deny-by-default.
+- One Git worktree per execution attempt (`factory-lab-<task-id>-<attempt>`); retained until user acknowledgment; never auto-merged.
 - `factory task logs <task-id>` returns execution output.
-- Task status reflects running/completed/failed.
+- `factory task deliver <exec-id>` stages worktree changes into a feature branch in the original repository; no auto-merge or PR.
+- `factory task cleanup <exec-id>` removes a worktree/execution (refuses unless `--force` on dirty/non-terminal).
+- Task status remains `approved` during execution; execution lifecycle is `queued → running → completed` with `failed`/`paused` alternatives.
+- Environment allowlist and secret redaction for the OpenCode subprocess.
+- No OS-level sandboxing, no resume of a terminated process, no database, no cloud infrastructure.
 
 ### M6 — QA & approval gates
 - QA/review step runs tests/lint after implementation.

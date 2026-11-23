@@ -17,9 +17,11 @@ Factory Lab is a general-purpose autonomous software development framework. It u
 | Local project registration | Cloud worker infrastructure |
 | Repository inspection and tech detection | Docker / container execution |
 | Task intake and planning | Web dashboard / API layer |
-| OpenCode execution initiation | Job queues / distributed execution |
-| Execution status and result tracking | GitHub pull request creation |
-| Approval gates for sensitive ops | Persistent application database |
+| OpenCode execution via replaceable runtime adapter | Job queues / distributed execution |
+| Execution status, logs, and result tracking | GitHub pull request creation |
+| Approval gates for sensitive operations | Persistent application database |
+| Git worktree execution workspace | OS-level process sandboxing |
+| Feature-branch delivery to original repository | Automatic merge to original branch |
 
 ## High-Level Architecture
 
@@ -68,12 +70,13 @@ The two planes communicate through well-defined interfaces; neither imports the 
 | Implementation planning | Deterministic implementation plan generation from project profile; tech overlays gated on inspection evidence | Control plane; no execution-plane imports |
 | Agent orchestration | Agent delegation, state transitions | Stateful orchestration logic |
 | Specialized agent roles | Architect, Developer, QA, Reviewer, EM | Logical roles, not separate model instances |
-| Coding runtime adapters | OpenCode (initial), future runtimes | Translates plan → runtime execution |
+| Coding runtime adapters | OpenCode adapter (initial), future runtimes | Translates approved plan → runtime execution; no OpenCode imports in control plane |
 | Model provider adapters | OpenRouter (initial), future providers | Abstraction over model API |
-| Execution environments | Local workspace execution; future Docker/cloud | Abstracts where code runs |
+| Execution environments | Local process execution; future Docker/cloud workers | Abstracts where code runs via `ExecutionEnvironment` interface |
+| Execution records | Per-attempt execution lifecycle, logs, artifacts, test results | Linked to task and approved plan revision |
 | Git & repo integrations | Git CLI operations; GitHub API optional future | Repository-agnostic |
 | Validation & QA | Lint, test execution, regression checks | Quality gates |
-| Logging & observability | Execution logs, traces, status history | Observability surface |
+| Logging & observability | Opaque runtime output capture, execution logs, artifacts | Observability surface; secrets redacted |
 
 Agent roles are logical responsibilities assigned to orchestration steps, not necessarily separate model instances or processes.
 
@@ -114,7 +117,7 @@ sequenceDiagram
 
 | Phase | Execution target | State store | Queue |
 |---|---|---|---|
-| Phase 1 (local) | Local workspace / process | In-memory + local files | None |
+| Phase 1 (local, M1–M5) | Local workspace / Git worktrees / local process | JSON sidecar files | None |
 | Phase 2 | Local + Git worktrees | SQLite/PostgreSQL | None |
 | Phase 3 | Docker containers local | PostgreSQL | Redis (optional) |
 | Phase 4 | Cloud workers | PostgreSQL + centralized | Redis / cloud queue |
